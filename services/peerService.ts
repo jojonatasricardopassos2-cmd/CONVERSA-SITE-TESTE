@@ -1,3 +1,4 @@
+
 // Interface for the global PeerJS object loaded via CDN
 declare const Peer: any;
 
@@ -20,28 +21,47 @@ export class PeerService {
     onStream: (stream: MediaStream) => void;
     onClose: () => void;
   }) {
-    this.peer = new Peer(myId, {
-      debug: 2
-    });
+    // PeerJS might fail if ID is taken or server is down
+    try {
+      if (this.peer) {
+        this.peer.destroy();
+      }
 
-    this.peer.on('open', (id: string) => {
-      console.log('My peer ID is: ' + id);
-    });
+      this.peer = new Peer(myId, {
+        debug: 1
+      });
 
-    this.peer.on('call', (incomingCall: any) => {
-      console.log('Receiving call...');
-      this.call = incomingCall;
-      callbacks.onIncomingCall(incomingCall.peer);
-    });
+      this.peer.on('open', (id: string) => {
+        console.log('My peer ID is: ' + id);
+      });
 
-    this.peer.on('error', (err: any) => {
-      console.error('Peer error:', err);
-    });
+      this.peer.on('call', (incomingCall: any) => {
+        console.log('Receiving call...');
+        // If we are already in a call, we might want to reject or replace.
+        // For simplicity here, we overwrite, but in prod we should check state.
+        this.call = incomingCall; 
+        callbacks.onIncomingCall(incomingCall.peer);
+      });
+
+      this.peer.on('error', (err: any) => {
+        console.error('Peer error:', err);
+      });
+    } catch (e) {
+      console.error("Failed to initialize PeerJS", e);
+      throw e;
+    }
   }
 
   async startLocalStream(): Promise<MediaStream> {
-    this.myStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    return this.myStream;
+    if (this.myStream) return this.myStream;
+
+    try {
+      this.myStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      return this.myStream;
+    } catch (e) {
+      console.error("Microphone access denied or not available", e);
+      throw new Error("Acesso ao microfone negado ou indisponível.");
+    }
   }
 
   async makeCall(remoteId: string, callbacks: {
@@ -50,6 +70,11 @@ export class PeerService {
   }) {
     if (!this.myStream) await this.startLocalStream();
     
+    // Close existing call if any
+    if (this.call) {
+      this.call.close();
+    }
+
     this.call = this.peer.call(remoteId, this.myStream);
     this.setupCallEvents(this.call, callbacks);
   }
@@ -61,7 +86,21 @@ export class PeerService {
     if (!this.call) return;
     if (!this.myStream) await this.startLocalStream();
 
-    this.call.answer(this.myStream);
+    try {
+      // Check if connection is already active to prevent "InvalidStateError: stable"
+      // PeerJS doesn't expose readyState easily on MediaConnection, so we try-catch
+      this.call.answer(this.myStream);
+    } catch (e: any) {
+      // If the error is about state being 'stable', it means we are already connected/connecting
+      // which is fine, we just proceed to setup events.
+      if (e.message && e.message.includes('stable')) {
+        console.warn("Connection already stable, proceeding...");
+      } else {
+        console.error("Error answering call:", e);
+        throw e;
+      }
+    }
+    
     this.setupCallEvents(this.call, callbacks);
   }
 
@@ -69,6 +108,11 @@ export class PeerService {
     onStream: (stream: MediaStream) => void;
     onClose: () => void;
   }) {
+    // Remove previous listeners to avoid duplicates if setupCallEvents is called twice
+    call.off('stream');
+    call.off('close');
+    call.off('error');
+
     call.on('stream', (remoteStream: MediaStream) => {
       this.remoteStream = remoteStream;
       callbacks.onStream(remoteStream);
@@ -80,7 +124,8 @@ export class PeerService {
       callbacks.onClose();
     });
 
-    call.on('error', () => {
+    call.on('error', (err: any) => {
+      console.error("Call error:", err);
       this.cleanupCall();
       callbacks.onClose();
     });
@@ -89,20 +134,26 @@ export class PeerService {
   private setupAudioAnalysis() {
     if (!this.myStream || !this.remoteStream) return;
 
-    this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-    
-    // Input setup
-    const sourceInput = this.audioContext.createMediaStreamSource(this.myStream);
-    this.inputAnalyser = this.audioContext.createAnalyser();
-    this.inputAnalyser.fftSize = 32;
-    sourceInput.connect(this.inputAnalyser);
+    try {
+      if (this.audioContext) {
+        this.audioContext.close();
+      }
+      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      
+      // Input setup
+      const sourceInput = this.audioContext.createMediaStreamSource(this.myStream);
+      this.inputAnalyser = this.audioContext.createAnalyser();
+      this.inputAnalyser.fftSize = 32;
+      sourceInput.connect(this.inputAnalyser);
 
-    // Remote setup
-    const sourceRemote = this.audioContext.createMediaStreamSource(this.remoteStream);
-    this.remoteAnalyser = this.audioContext.createAnalyser();
-    this.remoteAnalyser.fftSize = 32;
-    sourceRemote.connect(this.remoteAnalyser);
-    // Note: We don't connect remote to destination here because the <audio> element in UI handles playback
+      // Remote setup
+      const sourceRemote = this.audioContext.createMediaStreamSource(this.remoteStream);
+      this.remoteAnalyser = this.audioContext.createAnalyser();
+      this.remoteAnalyser.fftSize = 32;
+      sourceRemote.connect(this.remoteAnalyser);
+    } catch (e) {
+      console.error("Audio Context Error", e);
+    }
   }
 
   startVolumeMonitoring(callback: (localVol: number, remoteVol: number) => void) {
@@ -156,6 +207,7 @@ export class PeerService {
     }
     if (this.peer) {
       this.peer.destroy();
+      this.peer = null;
     }
   }
 }

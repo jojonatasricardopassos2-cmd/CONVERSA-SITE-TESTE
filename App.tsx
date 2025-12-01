@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GameState, P2PState } from './types';
 import { LiveService } from './services/liveService';
@@ -11,6 +12,7 @@ const generateId = () => Math.random().toString(36).substring(2, 6).toUpperCase(
 
 export default function App() {
   const [gameState, setGameState] = useState<GameState>(GameState.MENU);
+  const [isBusy, setIsBusy] = useState(false); // Prevents double clicks
   
   // AI State
   const [isAiConnected, setIsAiConnected] = useState(false);
@@ -30,25 +32,34 @@ export default function App() {
   
   // --- AI HANDLERS ---
   const startAiGame = async () => {
+    if (isBusy) return;
     if (!API_KEY) {
       setError("Chave de API não encontrada (process.env.API_KEY).");
       return;
     }
+    
+    setIsBusy(true);
     setError(null);
     setGameState(GameState.PLAYING_AI);
     
-    liveServiceRef.current = new LiveService(API_KEY);
-    await liveServiceRef.current.connect({
-      onConnect: () => setIsAiConnected(true),
-      onDisconnect: () => setIsAiConnected(false),
-      onError: (err) => {
-        setError(err.message);
-        setIsAiConnected(false);
-      },
-      onVolumeChange: (input, output) => {
-        setVolumes({ input, output });
-      }
-    });
+    try {
+      liveServiceRef.current = new LiveService(API_KEY);
+      await liveServiceRef.current.connect({
+        onConnect: () => setIsAiConnected(true),
+        onDisconnect: () => setIsAiConnected(false),
+        onError: (err) => {
+          setError(err.message);
+          setIsAiConnected(false);
+        },
+        onVolumeChange: (input, output) => {
+          setVolumes({ input, output });
+        }
+      });
+    } catch (e: any) {
+      setError("Erro ao conectar IA: " + e.message);
+    } finally {
+      setIsBusy(false);
+    }
   };
 
   const stopAiGame = useCallback(() => {
@@ -62,62 +73,92 @@ export default function App() {
 
   // --- P2P HANDLERS ---
   const initP2P = async () => {
+    if (isBusy) return;
+    setIsBusy(true);
     setGameState(GameState.PLAYING_P2P);
     setP2PState(P2PState.WAITING);
     setError(null);
 
-    peerServiceRef.current = new PeerService();
-    await peerServiceRef.current.init(myId, {
-      onIncomingCall: (callerId) => {
-        setIncomingCallerId(callerId);
-        setP2PState(P2PState.CALLING); // Receiving call state
-      },
-      onStream: (stream) => {
-        if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = stream;
-          remoteAudioRef.current.play();
+    try {
+      peerServiceRef.current = new PeerService();
+      await peerServiceRef.current.init(myId, {
+        onIncomingCall: (callerId) => {
+          setIncomingCallerId(callerId);
+          setP2PState(P2PState.CALLING); // Receiving call state
+        },
+        onStream: (stream) => {
+          handleRemoteStream(stream);
+        },
+        onClose: () => {
+          setP2PState(P2PState.WAITING);
+          setIncomingCallerId(null);
+          setVolumes({ input: 0, output: 0 });
         }
-        setP2PState(P2PState.IN_CALL);
-      },
-      onClose: () => {
-        setP2PState(P2PState.WAITING);
-        setIncomingCallerId(null);
-        setVolumes({ input: 0, output: 0 });
-      }
-    });
+      });
 
-    // Start local mic immediately for volume feedback/readiness
-    await peerServiceRef.current.startLocalStream();
+      // Start local mic immediately for volume feedback/readiness
+      await peerServiceRef.current.startLocalStream();
+    } catch (e: any) {
+      setError("Erro ao iniciar P2P: " + e.message);
+      setGameState(GameState.MENU);
+    } finally {
+      setIsBusy(false);
+    }
   };
 
   const callPeer = async () => {
-    if (!targetId || !peerServiceRef.current) return;
+    if (!targetId || !peerServiceRef.current || isBusy) return;
+    setIsBusy(true);
     setP2PState(P2PState.CALLING);
+    setError(null);
     
-    await peerServiceRef.current.makeCall(targetId.toUpperCase(), {
-      onStream: (stream) => handleRemoteStream(stream),
-      onClose: handleCallEnd
-    });
-    
-    startP2PVolumeMonitoring();
+    try {
+      await peerServiceRef.current.makeCall(targetId.toUpperCase(), {
+        onStream: (stream) => handleRemoteStream(stream),
+        onClose: handleCallEnd
+      });
+      startP2PVolumeMonitoring();
+    } catch (e: any) {
+      setError("Falha na chamada: " + e.message);
+      setP2PState(P2PState.WAITING);
+    } finally {
+      setIsBusy(false);
+    }
   };
 
   const answerPeer = async () => {
-    if (!peerServiceRef.current) return;
+    if (!peerServiceRef.current || isBusy) return;
     
-    await peerServiceRef.current.answerCall({
-      onStream: (stream) => handleRemoteStream(stream),
-      onClose: handleCallEnd
-    });
-    
-    setIncomingCallerId(null);
-    startP2PVolumeMonitoring();
+    setIsBusy(true);
+    try {
+      await peerServiceRef.current.answerCall({
+        onStream: (stream) => handleRemoteStream(stream),
+        onClose: handleCallEnd
+      });
+      
+      setIncomingCallerId(null);
+      startP2PVolumeMonitoring();
+    } catch (e: any) {
+      setError("Erro ao atender: " + e.message);
+      // Don't reset P2PState immediately so user sees error, 
+      // but if call failed, peerService likely triggers close anyway.
+    } finally {
+      setIsBusy(false);
+    }
   };
 
   const handleRemoteStream = (stream: MediaStream) => {
+    console.log("Recebendo stream remoto", stream);
     if (remoteAudioRef.current) {
       remoteAudioRef.current.srcObject = stream;
-      remoteAudioRef.current.play().catch(e => console.error("Auto-play blocked:", e));
+      // Explicit play attempt
+      const playPromise = remoteAudioRef.current.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(error => {
+          console.error("Auto-play prevented:", error);
+          setError("Clique na página para ouvir o áudio.");
+        });
+      }
     }
     setP2PState(P2PState.IN_CALL);
   };
@@ -138,6 +179,9 @@ export default function App() {
       peerServiceRef.current.destroy();
       peerServiceRef.current = null;
     }
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = null;
+    }
     setP2PState(P2PState.DISCONNECTED);
     setGameState(GameState.MENU);
   };
@@ -155,8 +199,8 @@ export default function App() {
       <div className="absolute inset-0 bg-gradient-to-b from-transparent via-purple-900/20 to-black pointer-events-none" />
       <div className="absolute inset-0 scanline opacity-20 pointer-events-none" />
       
-      {/* Hidden audio element for P2P */}
-      <audio ref={remoteAudioRef} className="hidden" />
+      {/* Audio element for P2P - Important: autoPlay */}
+      <audio ref={remoteAudioRef} autoPlay className="hidden" />
 
       {/* Main Container */}
       <div className="relative z-10 w-full max-w-2xl bg-slate-900/90 backdrop-blur-md border border-slate-700 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
@@ -187,7 +231,8 @@ export default function App() {
               <div className="grid grid-cols-1 gap-4">
                 <button
                   onClick={startAiGame}
-                  className="group relative p-6 bg-gradient-to-br from-purple-900/50 to-slate-900 border border-purple-500/30 rounded-xl hover:border-purple-500 transition-all text-left"
+                  disabled={isBusy}
+                  className={`group relative p-6 bg-gradient-to-br from-purple-900/50 to-slate-900 border border-purple-500/30 rounded-xl transition-all text-left hover:shadow-[0_0_20px_rgba(168,85,247,0.2)] ${isBusy ? 'opacity-50 cursor-not-allowed' : 'hover:border-purple-500'}`}
                 >
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-purple-300 font-bold text-lg">Capitão Xylar (IA)</span>
@@ -198,7 +243,8 @@ export default function App() {
 
                 <button
                   onClick={initP2P}
-                  className="group relative p-6 bg-gradient-to-br from-cyan-900/50 to-slate-900 border border-cyan-500/30 rounded-xl hover:border-cyan-500 transition-all text-left"
+                  disabled={isBusy}
+                  className={`group relative p-6 bg-gradient-to-br from-cyan-900/50 to-slate-900 border border-cyan-500/30 rounded-xl transition-all text-left hover:shadow-[0_0_20px_rgba(34,211,238,0.2)] ${isBusy ? 'opacity-50 cursor-not-allowed' : 'hover:border-cyan-500'}`}
                 >
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-cyan-300 font-bold text-lg">Canal Seguro (Humano)</span>
@@ -209,7 +255,7 @@ export default function App() {
               </div>
               
               {error && (
-                <div className="p-3 bg-red-900/50 border border-red-700 text-red-200 rounded text-sm">
+                <div className="p-3 bg-red-900/50 border border-red-700 text-red-200 rounded text-sm animate-pulse">
                   {error}
                 </div>
               )}
@@ -225,8 +271,10 @@ export default function App() {
                   </svg>
                 </div>
               </div>
-              <div className="h-8 text-center">
-                 {!isAiConnected ? (
+              <div className="h-8 text-center w-full">
+                 {error ? (
+                   <span className="text-red-400 font-bold">{error}</span>
+                 ) : !isAiConnected ? (
                    <span className="text-cyan-500 animate-pulse text-sm">CONECTANDO AO GEMINI...</span>
                  ) : (
                     <span className="text-purple-400 font-mono text-sm">:: LINK NEURAL ESTABELECIDO ::</span>
@@ -246,7 +294,7 @@ export default function App() {
               {/* ID Display */}
               <div className="bg-slate-800 p-4 rounded-lg border border-slate-600 w-full max-w-sm">
                 <p className="text-slate-400 text-xs uppercase mb-1">Seu ID de Comunicador</p>
-                <div className="text-3xl font-mono font-bold text-cyan-400 tracking-widest">{myId}</div>
+                <div className="text-3xl font-mono font-bold text-cyan-400 tracking-widest select-all">{myId}</div>
                 <p className="text-slate-500 text-[10px] mt-2">Compartilhe este código com outro piloto.</p>
               </div>
 
@@ -265,10 +313,10 @@ export default function App() {
                      />
                      <button 
                        onClick={callPeer}
-                       disabled={targetId.length < 4}
-                       className="bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white font-bold py-3 rounded shadow-lg shadow-cyan-900/50"
+                       disabled={targetId.length < 4 || isBusy}
+                       className={`bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-3 rounded shadow-lg shadow-cyan-900/50 transition-all ${isBusy ? 'opacity-50 cursor-not-allowed' : ''}`}
                      >
-                       INICIAR CHAMADA
+                       {isBusy ? 'CONECTANDO...' : 'INICIAR CHAMADA'}
                      </button>
                    </div>
                 )}
@@ -278,9 +326,10 @@ export default function App() {
                     <p className="text-yellow-400 mb-4 font-bold">CHAMADA ENTRANDO DE: {incomingCallerId}</p>
                     <button 
                        onClick={answerPeer}
-                       className="bg-green-600 hover:bg-green-500 text-white font-bold px-8 py-4 rounded-full shadow-[0_0_20px_#16a34a]"
+                       disabled={isBusy}
+                       className={`bg-green-600 hover:bg-green-500 text-white font-bold px-8 py-4 rounded-full shadow-[0_0_20px_#16a34a] ${isBusy ? 'opacity-50 cursor-not-allowed' : ''}`}
                      >
-                       ATENDER
+                       {isBusy ? 'CONECTANDO...' : 'ATENDER'}
                      </button>
                   </div>
                 )}
@@ -294,6 +343,10 @@ export default function App() {
                      <Visualizer level={volumes.input} color="bg-cyan-500" label="VOCÊ" />
                      <Visualizer level={volumes.output} color="bg-green-500" label="OUTRO PILOTO" />
                    </div>
+                )}
+                
+                {error && (
+                  <div className="text-red-400 text-xs mt-2">{error}</div>
                 )}
               </div>
 

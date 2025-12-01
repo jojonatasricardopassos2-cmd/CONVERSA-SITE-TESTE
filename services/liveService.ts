@@ -1,3 +1,4 @@
+
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { createPcmBlob, decodeBase64, pcmToAudioBuffer } from '../utils/audioUtils';
 
@@ -19,7 +20,7 @@ export class LiveService {
   private nextStartTime = 0;
   private stream: MediaStream | null = null;
   private isConnected = false;
-  private sessionPromise: Promise<any> | null = null; // Using any for the Session type from SDK
+  private sessionPromise: Promise<any> | null = null;
   
   // Volume analysis
   private inputAnalyser: AnalyserNode | null = null;
@@ -73,7 +74,14 @@ export class LiveService {
           },
           onerror: (err: any) => {
             console.error("Gemini Live Error", err);
-            callbacks.onError?.(new Error(err.message || "Unknown error"));
+            this.disconnect(); // Ensure we clean up on error
+            
+            // Translate common errors
+            let errorMessage = err.message || "Unknown error";
+            if (errorMessage.includes("503") || errorMessage.includes("unavailable")) {
+              errorMessage = "Serviço temporariamente indisponível (503). Por favor, tente novamente.";
+            }
+            callbacks.onError?.(new Error(errorMessage));
           }
         },
         config: {
@@ -105,17 +113,28 @@ export class LiveService {
     if (!this.inputAudioContext || !this.stream || !this.sessionPromise) return;
 
     this.inputSource = this.inputAudioContext.createMediaStreamSource(this.stream);
-    this.inputSource.connect(this.inputAnalyser!); // Connect to analyser
+    this.inputSource.connect(this.inputAnalyser!); 
     
-    // Using ScriptProcessor as per SDK guide for raw PCM streaming
     this.processor = this.inputAudioContext.createScriptProcessor(4096, 1, 1);
     
     this.processor.onaudioprocess = (e) => {
+      // Safety check: stop processing if disconnected
+      if (!this.isConnected || !this.sessionPromise) return;
+
       const inputData = e.inputBuffer.getChannelData(0);
       const pcmBlob = createPcmBlob(inputData);
       
-      this.sessionPromise?.then((session) => {
-        session.sendRealtimeInput({ media: pcmBlob });
+      this.sessionPromise.then((session) => {
+        // Double check inside promise in case state changed
+        if (this.isConnected) {
+          try {
+            session.sendRealtimeInput({ media: pcmBlob });
+          } catch (err) {
+             console.error("Error sending realtime input:", err);
+          }
+        }
+      }).catch(err => {
+        console.warn("Failed to resolve session for audio:", err);
       });
     };
 
@@ -131,20 +150,24 @@ export class LiveService {
     if (base64Audio) {
       this.nextStartTime = Math.max(this.nextStartTime, this.outputAudioContext.currentTime);
       
-      const rawBytes = decodeBase64(base64Audio);
-      const audioBuffer = pcmToAudioBuffer(rawBytes, this.outputAudioContext);
-      
-      const source = this.outputAudioContext.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(this.outputNode);
-      
-      source.addEventListener('ended', () => {
-        this.audioSources.delete(source);
-      });
+      try {
+        const rawBytes = decodeBase64(base64Audio);
+        const audioBuffer = pcmToAudioBuffer(rawBytes, this.outputAudioContext);
+        
+        const source = this.outputAudioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(this.outputNode);
+        
+        source.addEventListener('ended', () => {
+          this.audioSources.delete(source);
+        });
 
-      source.start(this.nextStartTime);
-      this.nextStartTime += audioBuffer.duration;
-      this.audioSources.add(source);
+        source.start(this.nextStartTime);
+        this.nextStartTime += audioBuffer.duration;
+        this.audioSources.add(source);
+      } catch (e) {
+        console.error("Error decoding audio:", e);
+      }
     }
 
     // Handle Interruption
@@ -161,7 +184,12 @@ export class LiveService {
   private startVolumeMonitoring(callback?: (inVol: number, outVol: number) => void) {
     if (!callback) return;
     
+    // Clear existing interval if any
+    if (this.volumeInterval) clearInterval(this.volumeInterval);
+
     this.volumeInterval = window.setInterval(() => {
+      if (!this.isConnected) return;
+
       let inputVol = 0;
       let outputVol = 0;
 
@@ -184,7 +212,6 @@ export class LiveService {
   disconnect() {
     this.isConnected = false;
     
-    // Stop Audio
     if (this.stream) {
       this.stream.getTracks().forEach(track => track.stop());
       this.stream = null;
@@ -214,9 +241,5 @@ export class LiveService {
       clearInterval(this.volumeInterval);
       this.volumeInterval = null;
     }
-
-    // Attempt to close session if SDK supported it explicitly via session object, 
-    // but usually disconnect cleans up the socket.
-    // We can rely on just stopping the client side for this demo.
   }
 }
