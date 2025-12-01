@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Diplomacia Galáctica</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+      body {
+        background-color: #050510;
+        color: #e2e8f0;
+      }
+      .stars {
+        background-image: radial-gradient(2px 2px at 20px 30px, #eee, rgba(0,0,0,0)),
+                          radial-gradient(2px 2px at 40px 70px, #fff, rgba(0,0,0,0)),
+                          radial-gradient(2px 2px at 50px 160px, #ddd, rgba(0,0,0,0)),
+                          radial-gradient(2px 2px at 90px 40px, #fff, rgba(0,0,0,0));
+        background-repeat: repeat;
+        background-size: 200px 200px;
+        animation: twinkle 5s infinite linear;
+      }
+      @keyframes twinkle {
+        from { background-position: 0 0; }
+        to { background-position: -100px 100px; }
+      }
+      .scanline {
+        background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.2) 50%, rgba(0,0,0,0.2));
+        background-size: 100% 4px;
+        pointer-events: none;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0"
+  }
+}
+</script>
+</head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

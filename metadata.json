@@ -1,0 +1,7 @@
+{
+  "name": "Diplomacia Galáctica - Chat de Voz IA",
+  "description": "Um jogo de negociação espacial onde você usa sua voz para conversar em tempo real com um comandante alienígena usando a API Gemini Live.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
